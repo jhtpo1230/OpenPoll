@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="1191" height="630" alt="image" src="https://github.com/user-attachments/assets/e7d99443-f31e-4c46-a0af-b41edc25d719" />
+  <img width="591" height="330" alt="image" src="https://github.com/user-attachments/assets/e7d99443-f31e-4c46-a0af-b41edc25d719" />
 </p>
 
 <h1 align="center">OpenPoll</h1>
@@ -30,17 +30,11 @@
 
 > 라이브 서비스는 종료되었지만, 아래는 **실제 운영 화면**입니다. 라이트/다크 모드를 모두 지원합니다.
 
-| 화면                                 | 라이트 모드                                                     | 다크 모드                                                      |
-| ------------------------------------ | --------------------------------------------------------------- | -------------------------------------------------------------- |
-| **Oauth 로그인**                     |     <img width="2880" height="1800" alt="image" src="https://github.com/user-attachments/assets/53acf911-dfed-47df-a41b-e256b92a77ef" />
-   |   <img width="2880" height="1800" alt="image" src="https://github.com/user-attachments/assets/72e6d706-211d-4bfc-b809-c6567ef590f6" />
-   |
-| **AI 중립 뉴스 목록**                     |    <img width="2880" height="6920" alt="image" src="https://github.com/user-attachments/assets/8bb2dfac-fc8c-4d54-b40b-d00a5aed95b0" />
-    |   <img width="2880" height="6920" alt="image" src="https://github.com/user-attachments/assets/f72ab54b-3bbd-4309-8442-403683f9f498" />
-   |
-| **AI 중립 뉴스 상세**                     |    <img width="2880" height="4906" alt="image" src="https://github.com/user-attachments/assets/c7724ce8-4811-4b7e-bbef-3a7f283fac58" />
-    |   <img width="2880" height="4906" alt="image" src="https://github.com/user-attachments/assets/f3c61de3-b16a-4f15-b67d-1bf3aff52531" />
-   |
+| 화면 | 라이트 모드 | 다크 모드 |
+| --- | --- | --- |
+| **OAuth 로그인** | <img src="https://github.com/user-attachments/assets/53acf911-dfed-47df-a41b-e256b92a77ef" width="320" height="200" alt="OAuth 로그인 라이트 모드" /> | <img src="https://github.com/user-attachments/assets/53acf911-dfed-47df-a41b-e256b92a77ef" width="320" height="200" alt="OAuth 로그인 다크 모드" /> |
+| **AI 중립 뉴스 목록** | <img src="https://github.com/user-attachments/assets/847d37f6-1149-4255-9bcc-a81d185a75b5" width="320" height="200" alt="AI 중립 뉴스 목록 라이트 모드" /> | <img src="https://github.com/user-attachments/assets/dcab0803-af94-435a-9d59-216330cc4489" width="320" height="200" alt="AI 중립 뉴스 목록 다크 모드" /> |
+| **AI 중립 뉴스 상세** | <img src="https://github.com/user-attachments/assets/dd6ba613-989b-48a8-9951-ec9d0c6e361b" width="320" height="200" alt="AI 중립 뉴스 상세 라이트 모드" /> | <img src="https://github.com/user-attachments/assets/41386798-0f3d-48ce-a54a-3d8fddac1666" width="320" height="200" alt="AI 중립 뉴스 상세 다크 모드" /> |
 
 ---
 
@@ -125,410 +119,114 @@ OpenPoll은 정치에 익숙하지 않은 사용자도 쉽게 참여할 수 있�
 
 # Backend Contribution
 
-# 1. 뉴스 크롤링 + AI 요약 파이프라인
+## 1. AI 뉴스 크롤링 · 요약 파이프라인
 
-뉴스 기능은 단순 크롤링 API가 아니라
-
-```text
-URL 수집
-→ 기사 본문 요청
-→ HTML 파싱
-→ AI API 호출
-→ 결과 가공
-→ DB 저장
-```
-
-처럼 여러 외부 I/O 작업이 연속해서 발생합니다.
-
-이를 안정적으로 처리하기 위해 뉴스 처리 과정을 여러 단계로 분리했습니다.
-
----
-
-## 1-1. 정치 뉴스 Headline URL 수집
-
-네이버 뉴스 정치 섹션에서 Headline 기사 URL을 수집합니다.
+네이버 정치 섹션의 주요 기사를 수집하고, AI로 요약한 뒤 DB에 저장하는 파이프라인을 구현했습니다.
 
 ```text
 Naver Politics
       ↓
-Cheerio Parsing
+Headline URL 수집
       ↓
-Headline
+BullMQ Article Job
       ↓
-URL + 언론사
+Worker (concurrency: 3)
+      ↓
+본문 파싱 · AI 요약
+      ↓
+Prisma Upsert
+      ↓
+PostgreSQL
 ```
 
-수집 과정에서 `Set`을 이용해 동일 URL을 한 번 더 걸러냅니다.
+### 기사 단위 비동기 처리
 
-```js
-const urls = new Set();
+전체 뉴스 갱신을 하나의 작업으로 처리하지 않고 **기사 하나를 하나의 BullMQ Job으로 분리**했습니다.
 
-if (urls.has(naverUrl)) return;
+특정 기사에서 네트워크·파싱·AI 요약 오류가 발생해도 다른 기사 처리는 유지되도록 `Promise.allSettled()`로 결과를 개별 처리했습니다.
 
-urls.add(naverUrl);
-items.push({ naverUrl, press });
-```
+Worker는 `concurrency: 3`으로 제한해 뉴스 사이트와 AI API에 과도한 동시 요청이 발생하지 않도록 했습니다.
 
-전체 기사 페이지를 한 번에 처리하지 않고
-먼저 **처리 대상 URL만 수집한 뒤 각 기사를 독립된 작업으로 넘기는 구조**로 설계했습니다.
+### 중복 데이터 · 중복 실행 방지
 
----
+반복 수집되는 동일 기사는 `naverUrl` 기준 Prisma `upsert`로 중복 저장을 방지했습니다.
 
-## 1-2. 기사 단위 BullMQ Job 분리
-
-처음부터 전체 뉴스를 하나의 큰 작업으로 처리하지 않고
-**기사 하나를 하나의 BullMQ Job으로 분리했습니다.**
+뉴스 갱신 자체가 동시에 실행되는 문제는 Redis의 `cooldown`과 `lock`으로 제어했습니다.
 
 ```text
-Article A → Job A ─┐
-Article B → Job B ─┼→ BullMQ → Worker
-Article C → Job C ─┘
-```
-
-기사 URL을 기반으로 `jobId`를 생성합니다.
-
-```js
-const jobId = Buffer
-  .from(item.naverUrl)
-  .toString('base64url');
-```
-
-각 기사는 별도의 Job이므로 특정 기사에서
-
-* HTML 파싱 실패
-* 네트워크 오류
-* AI 요약 실패
-
-가 발생하더라도 다른 기사 작업까지 함께 실패하지 않습니다.
-
----
-
-## 1-3. Worker 동시 실행 개수 제한
-
-기사 처리 Worker는 `concurrency: 3`으로 구성했습니다.
-
-```js
-new Worker(
-  'article',
-  async (job) => {
-    // 본문 크롤링
-    // AI 요약
-    // DB 저장
-  },
-  {
-    concurrency: 3,
-  }
-);
-```
-
-뉴스 본문 크롤링과 AI API 호출은 모두 외부 요청이기 때문에
-Job을 무제한 병렬 처리하면 외부 서비스와 서버에 동시에 부하가 발생할 수 있습니다.
-
-따라서 Worker가 한 번에 처리할 수 있는 작업 수를 제한했습니다.
-
----
-
-## 1-4. 기사 본문 검증 및 실패 분리
-
-Worker에서 실제 뉴스 페이지를 요청한 뒤
-
-* 제목
-* 본문
-* 원문 URL
-
-을 추출합니다.
-
-```text
-Article URL
-     ↓
-Axios
-     ↓
-Cheerio
-     ↓
-Title / Body / Original URL
-```
-
-제목이 없거나 본문이 비정상적으로 짧으면 정상 기사로 처리하지 않습니다.
-
-```js
-if (!title) {
-  throw new Error('INVALID_TITLE');
-}
-
-if (!body || body.length < 100) {
-  throw new Error('INVALID_BODY');
-}
-```
-
-AI 요약 과정에서 오류가 발생한 경우도 별도의 실패 유형으로 구분했습니다.
-
-```js
-AI_SUMMARY_FAILED
-```
-
-갱신 작업에서는 `Promise.allSettled()`를 사용해 각 Job의 결과를 개별적으로 확인합니다.
-
-```text
-Job A → SUCCESS
-Job B → PARSING FAIL
-Job C → SUCCESS
-Job D → AI SUMMARY FAIL
-```
-
-따라서 Job B와 D가 실패하더라도 A와 C의 처리는 유지됩니다.
-
----
-
-## 1-5. URL 기준 Upsert로 중복 기사 방지
-
-뉴스 크롤러는 일정 주기로 반복 실행되기 때문에
-같은 기사가 다시 수집되는 상황이 자연스럽게 발생합니다.
-
-이를 위해 `naverUrl`을 기사 식별 기준으로 사용했습니다.
-
-```text
-기사 수집
+Refresh
    ↓
-naverUrl
-   ↓
-DB에 존재?
- ↙        ↘
-YES       NO
- ↓         ↓
-UPDATE    INSERT
-```
-
-Prisma의 `upsert`를 이용해 동일 URL의 기사가 다시 처리되더라도
-중복 Row가 생성되지 않도록 구성했습니다.
-
----
-
-# 2. Redis 기반 뉴스 갱신 중복 실행 제어
-
-기사 단위 중복뿐 아니라
-**뉴스 갱신 작업 자체가 동시에 여러 번 실행되는 문제**도 고려했습니다.
-
-예를 들어 두 요청이 거의 동시에 들어오면
-
-```text
-Request A ─→ News Refresh
-Request B ─→ News Refresh
-```
-
-동일한 뉴스가 두 번 크롤링되고 AI API도 중복 호출될 수 있습니다.
-
-이를 방지하기 위해 Redis에
-
-* `cooldown`
-* `lock`
-
-두 가지 상태를 관리했습니다.
-
----
-
-## 2-1. Redis Lua Script를 이용한 원자적 Guard
-
-단순하게
-
-```text
-GET lock
-→ 확인
-→ SET lock
-```
-
-순서로 처리할 경우 두 요청이 동시에 확인하는 순간 Race Condition이 발생할 수 있습니다.
-
-따라서 Redis Lua Script 안에서
-
-```text
-Cooldown 확인
-      ↓
-Lock 획득
-      ↓
-Cooldown 생성
-```
-
-을 하나의 연산으로 처리했습니다.
-
-```text
-Refresh Request
-      ↓
-Cooldown 존재?
- ┌────┴────┐
-YES        NO
- ↓          ↓
-SKIP     SET NX Lock
-             ↓
-         Cooldown 생성
-             ↓
-          Refresh
-```
-
-Lock은 `SET NX PX`를 이용하여 하나의 실행만 진입할 수 있도록 했습니다.
-
----
-
-## 2-2. Lock 소유권 확인 후 해제
-
-작업 완료 후 Lock을 단순히 삭제하지 않고
-자신이 생성한 Lock인지 확인한 뒤 삭제합니다.
-
-각 Lock에는
-
-```text
-process.pid + timestamp
-```
-
-기반의 값을 저장했습니다.
-
-```text
-현재 Redis Lock 값
-        ↓
-내 Lock 값과 동일?
-     ↙       ↘
-   YES       NO
-    ↓         ↓
-  DELETE     유지
-```
-
-이를 통해 다른 실행이 새롭게 획득한 Lock을 이전 작업이 실수로 삭제하지 않도록 했습니다.
-
----
-
-# 3. 주기적인 뉴스 자동 갱신
-
-뉴스 데이터는 별도의 요청이 없더라도 주기적으로 갱신될 수 있도록 구성했습니다.
-
-기본적으로 일정 간격마다 `refreshArticles()`를 호출합니다.
-
-```text
-Timer
-  ↓
-refreshArticles()
-  ↓
 Redis Guard
-  ↓
+   ↓
 Crawler
-  ↓
+   ↓
 BullMQ
 ```
 
-수동 뉴스 갱신과 자동 갱신 모두 같은 `refreshArticles()` 로직을 사용하기 때문에
-어떤 경로로 호출되더라도 동일한 Lock / Cooldown 정책을 거칩니다.
+Cooldown 확인과 Lock 획득은 **Redis Lua Script로 원자적으로 처리**했으며, 작업 종료 시 Lock 소유권을 확인한 뒤 해제하도록 구성했습니다.
+
+수동 갱신과 주기적 자동 갱신 모두 동일한 `refreshArticles()`를 사용해 같은 중복 실행 정책을 적용했습니다.
 
 ---
 
-# 4. 일반 회원 인증
+## 2. 인증 · OAuth
 
-OpenPoll의 인증은
+이메일 기반 일반 인증과 **Google / Naver OAuth 로그인**을 구현했습니다.
 
 ```text
-일반 이메일 회원
-+
-Google OAuth
-+
-Naver OAuth
+              Auth Service
+                   │
+        ┌──────────┴──────────┐
+        ↓                     ↓
+ Email / Password        Google / Naver
+        ↓                     ↓
+    JWT 인증             OAuth Provider
+        │                     ↓
+        │                State 검증
+        │                     ↓
+        └──────────→ 사용자 조회 / 가입
+                              ↓
+                    Access / Refresh Token
+                              ↓
+                            Redis
 ```
 
-를 함께 지원하도록 구현했습니다.
+### JWT Access / Refresh Token
 
-일반 회원은
+로그인 시 Access Token과 Refresh Token을 발급하고 Refresh Token은 Redis에 저장했습니다.
 
-* 이메일 인증
-* 회원가입
-* 로그인
-* Access Token 갱신
-* 로그아웃
-* 비밀번호 변경
-
-흐름을 제공합니다.
-
----
-
-
-# 5. JWT Access / Refresh Token 인증
-
-로그인 이후
+Access Token 갱신 시 다음 순서로 Refresh Token을 검증합니다.
 
 ```text
-Access Token
-+
-Refresh Token
-```
-
-을 발급합니다.
-
-Access Token은 실제 API 인증에 사용하고,
-Refresh Token은 새로운 Access Token을 발급할 때 사용합니다.
-
-Refresh Token은 Redis에 저장합니다.
-
-```text
-User Login
-    ↓
-Access Token
-Refresh Token
-    ↓
-Redis
-userId → refreshToken
-```
-
-Refresh 요청이 들어오면
-
-```text
-JWT Signature 검증
-        ↓
-Redis Refresh Token 조회
-        ↓
-요청 Token과 비교
-        ↓
-User 존재 확인
-        ↓
+JWT 검증
+   ↓
+Redis Token 조회
+   ↓
+요청 Token 비교
+   ↓
+User 확인
+   ↓
 새 Token 발급
 ```
 
-순서로 검증합니다.
+로그아웃 또는 비밀번호 변경 시 Redis의 Refresh Token을 삭제해 기존 인증 상태를 무효화했습니다.
 
-로그아웃 시 Redis에 저장된 Refresh Token을 삭제하며,
-비밀번호가 변경된 경우에도 기존 Refresh Token을 제거해 다시 로그인을 요구하도록 했습니다.
+### Google / Naver Provider 분리
 
----
-
-# 6. Google / Naver OAuth Provider 분리
-
-Google과 Naver는 모두 OAuth 기반 로그인이지만
-
-* Authorization URL
-* Token API
-* 사용자 정보 API
-* 응답 구조
-* 연동 해제 방식
-
-이 서로 다릅니다.
-
-Provider별 차이가 인증 서비스 전체에 퍼지지 않도록
-Google과 Naver 구현을 각각 Provider로 분리했습니다.
+Google과 Naver의 OAuth API 차이가 Auth Service에 직접 노출되지 않도록 Provider별 구현을 분리했습니다.
 
 ```text
-            Auth Service
-
-                 ↓
-
-           getProvider()
-
-        ┌────────┴────────┐
-        ↓                 ↓
-
- GoogleProvider       NaverProvider
-
- getAuthUrl()         getAuthUrl()
-
- getProfileFromCode() getProfileFromCode()
-
- revokeToken()        revokeToken()
+          Auth Service
+               ↓
+         getProvider()
+       ┌───────┴───────┐
+       ↓               ↓
+    Google           Naver
+       ↓               ↓
+    공통 Profile 형태 반환
 ```
 
-각 Provider가 외부 API 차이를 처리한 뒤 Auth Service에는 공통 형식으로 반환합니다.
+각 Provider는 사용자 정보를 다음과 같은 공통 구조로 반환합니다.
 
 ```js
 {
@@ -540,300 +238,63 @@ Google과 Naver 구현을 각각 Provider로 분리했습니다.
 }
 ```
 
-따라서 인증 서비스는 Google/Naver의 응답 구조를 직접 알 필요 없이
-공통된 Profile 형태만 처리합니다.
+이를 통해 Auth Service에서는 Provider별 응답 구조와 관계없이 동일한 가입·로그인 로직을 사용할 수 있도록 했습니다.
 
----
+### OAuth State · 가입 분기
 
-# 7. OAuth State 관리
+OAuth 요청 시 UUID 기반 `state`를 생성하고 Provider 정보와 요청 모드를 함께 저장했습니다.
 
-OAuth 로그인 시작 시 UUID 기반 `state`를 생성합니다.
-
-```text
-OAuth 로그인 요청
-       ↓
-UUID state 생성
-       ↓
-state 저장
-       ↓
-Google / Naver Authorization URL
-```
-
-저장하는 정보는
-
-```text
-providerName
-mode
-```
-
-입니다.
-
-Callback에서는 전달받은 state를 소비하고
-요청을 시작한 Provider와 Callback Provider가 동일한지 검증합니다.
-
-```text
-Callback
-   ↓
-state consume
-   ↓
-state 존재?
-   ↓
-provider 일치?
-   ↓
-OAuth 처리
-```
-
-유효하지 않거나 Provider가 일치하지 않는 state는 인증을 거부합니다.
-
-이 `state`는 OAuth 요청 검증뿐 아니라
-탈퇴 회원의 **재가입 모드(`rejoin`)를 Callback까지 전달하는 역할**도 수행합니다.
-
----
-
-# 8. OAuth 기존 회원 / 신규 회원 분기
-
-Provider에서 사용자 정보를 받아오면
-
-```text
-provider
-+
-providerUserId
-```
-
-조합을 기준으로 기존 OAuth 계정을 조회합니다.
+Callback에서는 `state`와 요청 Provider를 검증한 뒤, `provider + providerUserId`를 기준으로 기존 OAuth 계정을 조회합니다.
 
 ```text
 OAuth Callback
       ↓
-Provider Profile
+State 검증
       ↓
 OAuthAccount 조회
    ↙             ↘
-존재              없음
- ↓                 ↓
-로그인          신규 회원 생성
+기존 계정        신규 계정
+   ↓               ↓
+ 로그인      User + OAuthAccount 생성
 ```
 
-기존 OAuth 계정이면 연결된 User를 그대로 사용합니다.
+신규 가입 시 `User`, `OAuthAccount`, `PointHistory` 생성을 Prisma Transaction으로 묶어 처리했습니다.
 
-Provider에서 새로운 Refresh Token이 내려온 경우
-저장되어 있는 OAuth Refresh Token도 갱신합니다.
+### OAuth 탈퇴 · 재가입
 
----
+OAuth 회원 탈퇴 시 Provider별 `revokeToken()`을 호출해 Google / Naver 연동 해제를 시도합니다.
 
-## 신규 OAuth 회원
+이후 `provider + providerUserId`를 탈퇴 이력으로 저장하고 사용자를 삭제합니다.
 
-기존 OAuthAccount가 없다면 신규 가입을 진행합니다.
-
-먼저 Provider에서 이메일을 가져올 수 있는지 확인하고
-이미 일반 회원으로 사용 중인 이메일인지 검사합니다.
-
-신규 회원 생성 과정은
-
-```text
-User
-+
-OAuthAccount
-+
-회원가입 PointHistory
-```
-
-를 하나의 Prisma Transaction으로 묶었습니다.
-
-```text
-BEGIN
-
-User 생성
-
-OAuthAccount 생성
-
-PointHistory 생성
-
-COMMIT
-```
-
-OAuth로 처음 가입한 사용자는 닉네임·나이·지역·성별 등이 없을 수 있기 때문에
-
-```text
-profileComplete
-```
-
-값을 함께 반환합니다.
-
-프로필이 미완성이라면 이후 별도 API에서 추가 정보를 입력하도록 구성했습니다.
-
----
-
-# 9. OAuth 탈퇴 및 재가입 처리
-
-OAuth 계정의 경우 단순히 OpenPoll의 User만 삭제하면
-Provider에는 기존 OAuth 연결 정보가 남을 수 있습니다.
-
-따라서 탈퇴 과정에서 Provider별 `revokeToken()`을 호출합니다.
-
-### Google
-
-Google revoke API를 이용해 Token을 폐기합니다.
-
-### Naver
-
-Naver의 경우 Refresh Token으로 Access Token을 다시 발급한 뒤
-`grant_type=delete` 요청을 보내 연동을 해제합니다.
-
-Provider별 차이는 각각의 Provider 내부에서 처리합니다.
-
----
-
-## 탈퇴 이력 관리
-
-OAuth 회원이 탈퇴하면
-
-```text
-provider
-+
-providerUserId
-```
-
-정보를 `withdrawnOauth`에 기록한 뒤 User를 삭제합니다.
-
-```text
-OAuth 탈퇴
-   ↓
-Provider 연동 해제
-   ↓
-withdrawnOauth 저장
-   ↓
-User 삭제
-```
-
-같은 OAuth 계정으로 다시 접근하면
-탈퇴 이력이 존재하는지 확인합니다.
-
-```text
-OAuth Callback
-      ↓
-withdrawnOauth 존재?
-     ↙           ↘
-   YES            NO
-    ↓              ↓
-rejoin 확인      일반 로그인/가입
-```
-
-일반 OAuth 요청이라면 `REJOIN_REQUIRED`를 반환하고,
-사용자가 재가입을 선택해 `rejoin` 모드로 인증을 시작한 경우에만 탈퇴 이력을 삭제하고 다시 가입 절차를 진행합니다.
-
-즉 OAuth 회원의
+같은 OAuth 계정으로 다시 접근하면 탈퇴 이력을 확인하고, 사용자가 명시적으로 재가입을 선택한 경우에만 `rejoin` 상태를 통해 다시 가입할 수 있도록 구현했습니다.
 
 ```text
 가입
-→ 로그인
-→ 탈퇴
-→ 재가입
+ ↓
+로그인
+ ↓
+탈퇴
+ ↓
+재가입
 ```
 
-전체 생명주기를 하나의 인증 흐름 안에서 관리하도록 구현했습니다.
+이를 통해 단순 OAuth 로그인뿐 아니라 **가입부터 탈퇴·재가입까지의 사용자 생명주기**를 처리했습니다.
 
 ---
 
-# Authentication Flow
+## 3. AWS · CI/CD
 
-```text
-                     [일반 회원]
+실제 서비스 배포 과정에서 **AWS 환경 설정 및 GitHub Actions 기반 CI/CD 구축을 보조**했습니다.
 
-사용자
-  ↓
-이메일 인증
-  ↓
-회원가입
-  ↓
-bcrypt Password Hash
-  ↓
-User + PointHistory Transaction
-  ↓
-Access / Refresh Token
-  ↓
-Refresh Token → Redis
+또한 서비스 운영 시작을 위해 기존 개발 환경의 AWS 리소스를 운영 계정으로 이전하고, 이전된 환경에서 서비스가 정상적으로 배포·동작하도록 관련 설정을 점검했습니다.
 
+### 담당 영역
 
-                     [OAuth]
-
-사용자
-  ↓
-Google / Naver 로그인
-  ↓
-state 생성 및 저장
-  ↓
-OAuth Provider
-  ↓
-Callback
-  ↓
-state 검증
-  ↓
-Provider Profile 정규화
-  ↓
-탈퇴 이력 확인
-  ↓
-OAuthAccount 조회
-    │
-    ├─ 기존 계정 → 로그인
-    │
-    └─ 신규 계정
-           ↓
-        User 생성
-        OAuthAccount 생성
-        PointHistory 생성
-           ↓
-    Access / Refresh Token
-```
-
----
-
-# News Processing Flow
-
-```text
-                    Refresh Trigger
-                           │
-                           ↓
-                 Redis Refresh Guard
-                           │
-                 ┌─────────┴─────────┐
-                 │                   │
-             COOLDOWN              LOCKED
-                 │                   │
-                SKIP                SKIP
-                           │
-                           ↓
-                Naver Politics Crawler
-                           │
-                           ↓
-                  Headline URL List
-                           │
-                           ↓
-                  BullMQ Article Queue
-                           │
-             ┌─────────────┼─────────────┐
-             ↓             ↓             ↓
-           Job A          Job B          Job C
-             │             │             │
-             └─────────────┼─────────────┘
-                           ↓
-                  Worker concurrency=3
-                           │
-                           ↓
-                    Article Crawling
-                           │
-                           ↓
-                    Content Validate
-                           │
-                           ↓
-                       AI Summary
-                           │
-                           ↓
-                    Prisma Upsert
-                           │
-                           ↓
-                     PostgreSQL
-```
+- AWS 배포 환경 설정 보조
+- GitHub Actions CI/CD 파이프라인 구축 보조
+- EC2 배포 환경 점검
+- 서비스 운영을 위한 AWS 계정 이전
+- 이전 환경에 맞춘 배포 설정 및 서비스 구동 확인
 
 ---
 
@@ -1000,7 +461,8 @@ OpenPoll은 AWS 환경에 실제 배포하여 운영했습니다.
 
 작업에 참여했습니다.
 
-<!-- AWS 아키텍처 이미지 삽입 -->
+<img width="671" height="520" alt="image" src="https://github.com/user-attachments/assets/471419f5-9bf7-497d-8c51-5ada84a1efb4" />
+
 
 ```text
 [사용자]
